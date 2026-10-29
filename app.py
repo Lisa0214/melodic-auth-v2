@@ -1,7 +1,6 @@
 import csv
 import io
 import json
-import re
 from urllib.request import Request, urlopen
 import secrets
 import time
@@ -176,9 +175,9 @@ if len(files) != 20:
 s = st.session_state
 if s.phase == 'register':
     st.subheader('第一步｜輸入Email並註冊兩首秘密旋律')
-    email = st.text_input('受試者Email', value=s.user_email, placeholder='name@example.com').strip().lower()
+    email = st.text_input('受試者Email（僅作研究識別）', value=s.user_email, placeholder='請輸入Email或受試者代碼').strip()
     consent = st.checkbox('我同意研究系統記錄Email、旋律判斷、反應時間及驗證結果，用於研究分析。')
-    st.caption('資料將傳送至研究者管理的Google Sheets；請勿輸入密碼。')
+    st.caption('Email僅供研究識別，不驗證格式或信箱所有權；資料將傳送至研究者管理的Google Sheets。')
     names = [p.name for p in files]
     a = st.selectbox('秘密旋律 A（第一輪）', names, index=None, placeholder='請選擇A')
     b = st.selectbox('秘密旋律 B（第二輪）', names, index=None, placeholder='請選擇B')
@@ -189,7 +188,7 @@ if s.phase == 'register':
         if b:
             st.write('B')
             st.audio((MUSIC_DIR / b).read_bytes(), format='audio/mpeg')
-    email_valid = bool(re.fullmatch(r"[^\\s@]+@[^\\s@]+\\.[^\\s@]+", email))
+    email_valid = bool(email)
     if st.button('完成註冊並開始驗證', type='primary',
                  disabled=not a or not b or a == b or not email_valid or not consent):
         s.user_email = email
@@ -203,7 +202,7 @@ if s.phase == 'register':
         start_round(1, files)
         st.rerun()
     if email and not email_valid:
-        st.warning('請輸入有效格式的Email。')
+        st.warning('請輸入Email或受試者代碼。')
     if a and b and a == b:
         st.warning('A與B必須是不同的旋律。')
 
