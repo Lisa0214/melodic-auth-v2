@@ -1,5 +1,8 @@
 import csv
 import io
+import json
+import re
+from urllib.request import Request, urlopen
 import secrets
 import time
 from datetime import datetime, timezone
@@ -19,16 +22,71 @@ def initial_state():
         'round': 0, 'order': [], 'index': 0, 'logs': [],
         'started': None, 'session_id': None, 'lock_until': 0.0,
         'result': None, 'reason': '', 'round_started': None,
+        'user_email': '', 'pending_logs': [], 'synced_count': 0,
     }
     for key, value in defaults.items():
         if key not in st.session_state:
             st.session_state[key] = value
 
 
+def send_log(row):
+    """Send one log event from the Streamlit server, not the participant's browser."""
+    url = st.secrets.get("GOOGLE_SCRIPT_URL", "")
+    token = st.secrets.get("GOOGLE_WRITE_TOKEN", "")
+    if not url or not token:
+        return False, "尚未設定 Google Sheets 連線資訊"
+
+    payload = {
+        "token": token,
+        "timestamp": row["timestamp_utc"],
+        "user_email": row["user_email"],
+        "session_id": row["session_id"],
+        "round": row["round"],
+        "step": row["step"],
+        "track_id": row["track_id"],
+        "answer": row["answer"],
+        "rt_sec": row["rt_sec"],
+        "round_elapsed_sec": row["round_elapsed_sec"],
+        "outcome": row["outcome"],
+    }
+    request = Request(
+        url,
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={"Content-Type": "text/plain; charset=utf-8"},
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=12) as response:
+            result = json.loads(response.read().decode("utf-8"))
+        if result.get("ok") is True:
+            return True, ""
+        return False, str(result.get("error", "Google Sheets 拒絕寫入"))
+    except Exception as exc:
+        return False, f"{type(exc).__name__}: {exc}"
+
+
+def sync_pending_logs():
+    """Retry unsent events without deleting the local CSV backup."""
+    s = st.session_state
+    remaining = []
+    for i, row in enumerate(s.pending_logs):
+        ok, error = send_log(row)
+        if ok:
+            s.synced_count += 1
+        else:
+            remaining = s.pending_logs[i:]
+            s.sync_error = error
+            break
+    s.pending_logs = remaining
+    if not remaining:
+        s.sync_error = ""
+
+
 def record(action, filename, outcome='continue'):
     now = time.monotonic()
-    st.session_state.logs.append({
+    row = {
         'timestamp_utc': datetime.now(timezone.utc).isoformat(),
+        'user_email': st.session_state.user_email,
         'session_id': st.session_state.session_id,
         'round': st.session_state['round'],
         'step': st.session_state['index'] + 1,
@@ -37,7 +95,9 @@ def record(action, filename, outcome='continue'):
         'rt_sec': round(now - st.session_state.started, 3) if st.session_state.started is not None else None,
         'round_elapsed_sec': round(now - st.session_state.round_started, 3) if st.session_state.round_started is not None else None,
         'outcome': outcome,
-    })
+    }
+    st.session_state.logs.append(row)
+    st.session_state.pending_logs.append(row)
 
 
 def start_round(number, files):
@@ -103,9 +163,9 @@ def csv_bytes(rows):
 
 
 initial_state()
-st.title('🎵 旋律式身分驗證 V2')
+st.title('🎵 旋律式身分驗證 V2.1')
 st.caption('研究原型｜20首曲庫｜雙秘密 A/B｜每輪11首｜兩輪皆通過才成功')
-st.info('本版本為教授規則的操作測試，不包含正式帳號密碼驗證、跨使用者資料庫或正式身分認證。請勿用於真實帳號登入。')
+st.info('研究原型：Email僅供受試者識別，不驗證信箱所有權；本系統不適用於真實帳號登入。')
 
 files = sorted(p for p in MUSIC_DIR.glob('*.mp3') if p.is_file()) if MUSIC_DIR.exists() else []
 st.write(f'目前讀取到 **{len(files)} 首 MP3**（資料夾：`music/`）')
@@ -115,7 +175,10 @@ if len(files) != 20:
 
 s = st.session_state
 if s.phase == 'register':
-    st.subheader('第一步｜註冊兩首秘密旋律')
+    st.subheader('第一步｜輸入Email並註冊兩首秘密旋律')
+    email = st.text_input('受試者Email', value=s.user_email, placeholder='name@example.com').strip().lower()
+    consent = st.checkbox('我同意研究系統記錄Email、旋律判斷、反應時間及驗證結果，用於研究分析。')
+    st.caption('資料將傳送至研究者管理的Google Sheets；請勿輸入密碼。')
     names = [p.name for p in files]
     a = st.selectbox('秘密旋律 A（第一輪）', names, index=None, placeholder='請選擇A')
     b = st.selectbox('秘密旋律 B（第二輪）', names, index=None, placeholder='請選擇B')
@@ -126,13 +189,21 @@ if s.phase == 'register':
         if b:
             st.write('B')
             st.audio((MUSIC_DIR / b).read_bytes(), format='audio/mpeg')
-    if st.button('完成註冊並開始驗證', type='primary', disabled=not a or not b or a == b):
+    email_valid = bool(re.fullmatch(r"[^\\s@]+@[^\\s@]+\\.[^\\s@]+", email))
+    if st.button('完成註冊並開始驗證', type='primary',
+                 disabled=not a or not b or a == b or not email_valid or not consent):
+        s.user_email = email
         s.secret_a, s.secret_b = a, b
         s.logs = []
+        s.pending_logs = []
+        s.synced_count = 0
+        s.sync_error = ''
         s.session_id = secrets.token_hex(8)
         s.result = None
         start_round(1, files)
         st.rerun()
+    if email and not email_valid:
+        st.warning('請輸入有效格式的Email。')
     if a and b and a == b:
         st.warning('A與B必須是不同的旋律。')
 
@@ -147,10 +218,12 @@ elif s.phase == 'verify':
     with left:
         if st.button('YES｜這是我的旋律', type='primary', use_container_width=True):
             handle('YES', files)
+            sync_pending_logs()
             st.rerun()
     with right:
         if st.button('NO｜跳過', use_container_width=True):
             handle('NO', files)
+            sync_pending_logs()
             st.rerun()
     st.caption('按錯YES或跳過正解會立即失敗；不會提示正解位置。')
 
@@ -160,6 +233,15 @@ else:
     else:
         st.error(f'驗證失敗：{s.reason}')
         st.warning('本次失敗後設定25秒冷卻期。')
+    if s.pending_logs:
+        st.warning(f'尚有 {len(s.pending_logs)} 筆紀錄未成功同步至Google Sheets。請保留CSV備份。')
+        if st.button('重試同步未上傳紀錄'):
+            sync_pending_logs()
+            st.rerun()
+        if s.get('sync_error'):
+            st.caption(f'同步錯誤：{s.sync_error}')
+    elif s.logs:
+        st.success(f'已向Google Sheets送出 {s.synced_count} 筆操作紀錄。')
     if s.logs:
         st.download_button('下載本次實驗紀錄 CSV', data=csv_bytes(s.logs),
                            file_name=f'melodic_v2_{s.session_id}.csv', mime='text/csv')
@@ -177,4 +259,4 @@ else:
             st.rerun()
 
 st.divider()
-st.caption('資料僅保存在目前瀏覽器工作階段；請在關閉頁面前下載CSV。免費雲端執行環境不保證永久儲存。')
+st.caption('實驗Log會嘗試同步至研究者的Google Sheets；若同步失敗，請下載CSV備份。Email為自行填寫，未經信箱驗證。')
