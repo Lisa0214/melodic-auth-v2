@@ -1,5 +1,3 @@
-import csv
-import io
 import json
 from urllib.request import Request, urlopen
 import secrets
@@ -67,7 +65,7 @@ def send_log(row):
 
 
 def sync_pending_logs():
-    """Retry unsent events without deleting the local CSV backup."""
+    """Retry unsent events; retain them in session until delivered."""
     s = st.session_state
     remaining = []
     for i, row in enumerate(s.pending_logs):
@@ -169,15 +167,6 @@ def handle(answer):
                 s.started = time.monotonic()
 
 
-def csv_bytes(rows):
-    if not rows:
-        return b''
-    out = io.StringIO()
-    writer = csv.DictWriter(out, fieldnames=list(rows[0]))
-    writer.writeheader()
-    writer.writerows(rows)
-    return out.getvalue().encode('utf-8-sig')
-
 
 initial_state()
 st.markdown("""<style>
@@ -273,7 +262,7 @@ else:
         st.error(s.reason)
         st.warning('本次失敗後須等待25秒才能重新開始。')
     if s.pending_logs:
-        st.warning(f'尚有 {len(s.pending_logs)} 筆紀錄未同步至Google Sheets，請保留CSV備份。')
+        st.warning(f'尚有 {len(s.pending_logs)} 筆紀錄未同步至Google Sheets，請點選下方按鈕重試同步。')
         if st.button('重試同步未上傳紀錄'):
             sync_pending_logs()
             st.rerun()
@@ -284,16 +273,22 @@ else:
     remaining = max(0, int(s.lock_until - time.monotonic() + 0.999))
     if remaining:
         st.write(f'剩餘冷卻時間約 **{remaining} 秒**，時間到後再按下方按鈕。')
-    if st.button('重新註冊／開始新一次測試', use_container_width=True):
+    if st.button('保留密碼，從第一輪重新驗證', use_container_width=True):
         if time.monotonic() < s.lock_until:
             st.warning('25秒冷卻期尚未結束，請稍後再試。')
         else:
-            s.phase = 'register'
-            s.secret = None
-            s.round_orders = {}
+            # 保留原本的秘密旋律與受試者識別資料。
+            # 每次挑戰重新產生兩輪歌曲排列，仍維持3至5首跨輪重複。
+            s.round_orders, s.overlap_count = make_round_orders(files, s.secret)
+            s.session_id = secrets.token_hex(8)  # 每次挑戰獨立識別，便於分析
+            s.result = None
+            s.reason = ''
+            s.lock_until = 0.0
             s.logs = []
+            # 不清除 pending_logs，以免前次尚未同步的紀錄遺失。
+            start_round(1)
             st.rerun()
 
 st.divider()
-st.caption('研究Log會同步至Google Sheets；同步失敗時可下載CSV備份。'
+st.caption('研究Log僅由系統同步至研究者管理的Google Sheets，不提供使用者下載。'
            '本研究原型的25秒限制僅作用於目前Session，非跨裝置的正式帳號鎖定。')
