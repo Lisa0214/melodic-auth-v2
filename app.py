@@ -281,9 +281,6 @@ else:
             st.caption(f'同步錯誤：{s.sync_error}')
     elif s.logs:
         st.success(f'已向Google Sheets送出 {s.synced_count} 筆操作紀錄。')
-    if s.logs:
-        st.download_button('下載本次實驗紀錄 CSV', data=csv_bytes(s.logs),
-                           file_name=f'melodic_v22_{s.session_id}.csv', mime='text/csv')
     remaining = max(0, int(s.lock_until - time.monotonic() + 0.999))
     if remaining:
         st.write(f'剩餘冷卻時間約 **{remaining} 秒**，時間到後再按下方按鈕。')
