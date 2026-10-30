@@ -270,24 +270,31 @@ else:
             st.caption(f'同步錯誤：{s.sync_error}')
     elif s.logs:
         st.success(f'已向Google Sheets送出 {s.synced_count} 筆操作紀錄。')
-    remaining = max(0, int(s.lock_until - time.monotonic() + 0.999))
-    if remaining:
-        st.write(f'剩餘冷卻時間約 **{remaining} 秒**，時間到後再按下方按鈕。')
-    if st.button('保留密碼，從第一輪重新驗證', use_container_width=True):
-        if time.monotonic() < s.lock_until:
-            st.warning('25秒冷卻期尚未結束，請稍後再試。')
-        else:
-            # 保留原本的秘密旋律與受試者識別資料。
-            # 每次挑戰重新產生兩輪歌曲排列，仍維持3至5首跨輪重複。
+    @st.fragment(run_every="1s")
+    def cooldown_and_retry():
+        # 只更新倒數區域，不重新執行整個應用或重複送出 Log。
+        seconds = max(0, int(s.lock_until - time.monotonic() + 0.999))
+        if seconds:
+            st.markdown(f"### ⏳ 安全冷卻倒數：{seconds} 秒")
+            st.progress((LOCK_SECONDS - seconds) / LOCK_SECONDS)
+            st.caption("倒數會每秒自動更新；結束後即可重新驗證。")
+        elif not s.result:
+            st.success("✅ 25秒冷卻結束，可以重新驗證。")
+
+        if st.button('保留密碼，從第一輪重新驗證',
+                     use_container_width=True, disabled=seconds > 0):
+            # 保留原密碼與受試者識別；重新抽樣兩輪歌曲。
             s.round_orders, s.overlap_count = make_round_orders(files, s.secret)
-            s.session_id = secrets.token_hex(8)  # 每次挑戰獨立識別，便於分析
+            s.session_id = secrets.token_hex(8)
             s.result = None
             s.reason = ''
             s.lock_until = 0.0
             s.logs = []
-            # 不清除 pending_logs，以免前次尚未同步的紀錄遺失。
+            # 保留 pending_logs，避免未同步紀錄遺失。
             start_round(1)
             st.rerun()
+
+    cooldown_and_retry()
 
 st.divider()
 st.caption('研究Log僅由系統同步至研究者管理的Google Sheets，不提供使用者下載。'
