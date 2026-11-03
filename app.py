@@ -11,7 +11,7 @@ st.set_page_config(page_title='旋律驗證 V2.2｜雙秘密雙回合', page_ico
 MUSIC_DIR = Path(__file__).resolve().parent / 'music'
 ROUND_SIZE = 11
 LOCK_SECONDS = 25
-MIN_OVERLAP = 3
+MIN_OVERLAP = 5
 MAX_OVERLAP = 5
 
 
@@ -20,7 +20,7 @@ def initial_state():
         'phase': 'register', 'secret_a': None, 'secret_b': None, 'round_orders': {}, 'overlap_count': None,
         'round': 0, 'order': [], 'index': 0, 'logs': [],
         'started': None, 'session_id': None, 'lock_until': 0.0,
-        'result': None, 'reason': '', 'round_started': None,
+        'result': None, 'reason': '', 'round_started': None, 'round_valid': {1: True, 2: True}, 'round_selected': {1: False, 2: False},
         'user_email': '', 'pending_logs': [], 'synced_count': 0,
     }
     for key, value in defaults.items():
@@ -100,10 +100,10 @@ def record(action, filename, outcome='continue'):
 
 
 def make_round_orders(files, secret_a, secret_b):
-    """Two different secrets; 11 songs per round; 3-5 shared distractors.
+    """Two different secrets; 11 songs per round; exactly 5 shared distractors.
 
     Each secret appears only in its assigned round. With 20 songs, the
-    remaining 18-song decoy pool supports 10 decoys per round and 3-5 overlap.
+    remaining 18-song decoy pool supports 10 decoys per round and 5 overlap.
     """
     rng = secrets.SystemRandom()
     names = [p.name for p in files]
@@ -146,32 +146,42 @@ def fail(reason):
 
 
 def handle(answer):
+    """First YES ends each round, regardless of correctness; no interim feedback.
+
+    NO advances to next track. Skipping the secret makes the round invalid.
+    Exhausting all tracks without YES also invalidates the round. Only the
+    final AND of both round outcomes is shown after round two.
+    """
     s = st.session_state
     filename = s.order[s['index']]
-    correct = s.secret_a if s['round'] == 1 else s.secret_b
+    secret = s.secret_a if s['round'] == 1 else s.secret_b
     if answer == 'YES':
-        if filename != correct:
-            record(answer, filename, 'failed_wrong_confirmation')
-            fail('確認了錯誤旋律。')
-        else:
-            record(answer, filename, 'round_passed')
-            if s['round'] == 1:
-                s.phase = 'round1_passed'
-            else:
-                s.phase = 'result'
-                s.result = True
-                s.reason = '第一輪及第二輪皆成功。'
+        s.round_selected[s['round']] = True
+        s.round_valid[s['round']] = (filename == secret) and s.round_valid[s['round']]
+        record(answer, filename, 'response_recorded')
+        finish_round()
     else:
-        if filename == correct:
-            record(answer, filename, 'failed_skipped_secret')
-            fail('跳過了正確旋律。')
+        if filename == secret:
+            s.round_valid[s['round']] = False
+        record(answer, filename, 'response_recorded')
+        s['index'] += 1
+        if s['index'] >= ROUND_SIZE:
+            s.round_valid[s['round']] = False
+            finish_round()
         else:
-            record(answer, filename, 'skipped_decoy')
-            s['index'] += 1
-            if s['index'] >= ROUND_SIZE:
-                fail('本輪未確認正確旋律。')
-            else:
-                s.started = time.monotonic()
+            s.started = time.monotonic()
+
+
+def finish_round():
+    s = st.session_state
+    if s['round'] == 1:
+        start_round(2)
+    else:
+        s.phase = 'result'
+        s.result = bool(s.round_valid[1] and s.round_valid[2])
+        s.reason = '驗證完成。' if s.result else '驗證未通過。'
+        if not s.result:
+            s.lock_until = time.monotonic() + LOCK_SECONDS
 
 
 
@@ -190,7 +200,7 @@ st.markdown("""<style>
     .song-number {font-size: 1.5rem; font-weight: 700;}
 </style>""", unsafe_allow_html=True)
 st.title('🎵 旋律式身分驗證 V2.2')
-st.caption('研究原型｜兩首不同秘密旋律｜兩輪各11首｜跨輪重複3至5首干擾旋律')
+st.caption('研究原型｜兩首不同秘密旋律｜兩輪各11首｜跨輪固定重複5首干擾旋律')
 st.info('Email僅供研究識別，不驗證信箱所有權；本研究原型不適用於正式帳號登入。')
 
 files = sorted(p for p in MUSIC_DIR.glob('*.mp3') if p.is_file()) if MUSIC_DIR.exists() else []
@@ -231,6 +241,8 @@ if s.phase == 'register':
         s.sync_error = ''
         s.session_id = secrets.token_hex(8)
         s.result = None
+        s.round_valid = {1: True, 2: True}
+        s.round_selected = {1: False, 2: False}
         s.lock_until = 0.0
         start_round(1)
         st.rerun()
@@ -255,16 +267,8 @@ elif s.phase == 'verify':
             handle('NO')
             sync_pending_logs()
             st.rerun()
-    st.caption('每首只判斷一次；誤按YES或跳過秘密旋律會立即判定該輪失敗。')
+    st.caption('YES：結束本輪並進入下一輪／最終結果；NO：播放下一首。第一輪不公布對錯。')
 
-elif s.phase == 'round1_passed':
-    st.markdown('<div class="big-status good">✅ 第一輪驗證成功！</div>',
-                unsafe_allow_html=True)
-    st.subheader('準備進入第二輪驗證')
-    st.write('第二輪請辨認不同的秘密旋律 B。兩輪僅有部分干擾旋律重複。')
-    if st.button('開始第二輪驗證', type='primary', use_container_width=True):
-        start_round(2)
-        st.rerun()
 
 else:
     if s.result:
@@ -272,9 +276,9 @@ else:
                     unsafe_allow_html=True)
         st.success('第一輪成功、第二輪成功。')
     else:
-        st.markdown(f'<div class="big-status bad">❌ 第 {s["round"]} 輪驗證失敗</div>',
+        st.markdown('<div class="big-status bad">❌ 驗證未通過</div>',
                     unsafe_allow_html=True)
-        st.error(s.reason)
+        st.error('兩輪驗證未通過。')
         st.warning('本次失敗後須等待25秒才能重新開始。')
     if s.pending_logs:
         st.warning(f'尚有 {len(s.pending_logs)} 筆紀錄未同步至Google Sheets，請點選下方按鈕重試同步。')
@@ -302,6 +306,8 @@ else:
             s.round_orders, s.overlap_count = make_round_orders(files, s.secret_a, s.secret_b)
             s.session_id = secrets.token_hex(8)
             s.result = None
+            s.round_valid = {1: True, 2: True}
+            s.round_selected = {1: False, 2: False}
             s.reason = ''
             s.lock_until = 0.0
             s.logs = []
