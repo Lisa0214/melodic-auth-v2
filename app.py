@@ -7,7 +7,7 @@ from pathlib import Path
 
 import streamlit as st
 
-st.set_page_config(page_title='旋律驗證 V2.2｜單秘密雙回合', page_icon='🎵', layout='centered')
+st.set_page_config(page_title='旋律驗證 V2.2｜雙秘密雙回合', page_icon='🎵', layout='centered')
 MUSIC_DIR = Path(__file__).resolve().parent / 'music'
 ROUND_SIZE = 11
 LOCK_SECONDS = 25
@@ -17,7 +17,7 @@ MAX_OVERLAP = 5
 
 def initial_state():
     defaults = {
-        'phase': 'register', 'secret': None, 'round_orders': {}, 'overlap_count': None,
+        'phase': 'register', 'secret_a': None, 'secret_b': None, 'round_orders': {}, 'overlap_count': None,
         'round': 0, 'order': [], 'index': 0, 'logs': [],
         'started': None, 'session_id': None, 'lock_until': 0.0,
         'result': None, 'reason': '', 'round_started': None,
@@ -99,24 +99,31 @@ def record(action, filename, outcome='continue'):
     st.session_state.pending_logs.append(row)
 
 
-def make_round_orders(files, secret):
-    """Exactly 3-5 distinct songs overlap across 11-song rounds, including secret."""
+def make_round_orders(files, secret_a, secret_b):
+    """Two different secrets; 11 songs per round; 3-5 shared distractors.
+
+    Each secret appears only in its assigned round. With 20 songs, the
+    remaining 18-song decoy pool supports 10 decoys per round and 3-5 overlap.
+    """
     rng = secrets.SystemRandom()
     names = [p.name for p in files]
-    pool = [name for name in names if name != secret]
+    if secret_a == secret_b or secret_a not in names or secret_b not in names:
+        raise ValueError('兩輪必須選擇不同且存在於曲庫中的秘密旋律。')
+    pool = [name for name in names if name not in (secret_a, secret_b)]
     if len(pool) < 18:
-        raise ValueError('至少需要19首不同歌曲，才能控制兩輪的重複歌曲數。')
+        raise ValueError('至少需要20首不同歌曲，才能維持雙秘密及跨輪重複3至5首的設定。')
     first_decoys = rng.sample(pool, ROUND_SIZE - 1)
     overlap_count = rng.randint(MIN_OVERLAP, MAX_OVERLAP)
-    shared_decoys = rng.sample(first_decoys, overlap_count - 1)
+    shared_decoys = rng.sample(first_decoys, overlap_count)
     remaining = [name for name in pool if name not in first_decoys]
-    second_decoys = shared_decoys + rng.sample(remaining, ROUND_SIZE - overlap_count)
-    first = first_decoys + [secret]
-    second = second_decoys + [secret]
+    second_decoys = shared_decoys + rng.sample(remaining, ROUND_SIZE - 1 - overlap_count)
+    first = first_decoys + [secret_a]
+    second = second_decoys + [secret_b]
     rng.shuffle(first)
     rng.shuffle(second)
     assert len(first) == len(second) == ROUND_SIZE
     assert len(set(first) & set(second)) == overlap_count
+    assert secret_a not in second and secret_b not in first
     return {1: first, 2: second}, overlap_count
 
 
@@ -141,7 +148,7 @@ def fail(reason):
 def handle(answer):
     s = st.session_state
     filename = s.order[s['index']]
-    correct = s.secret
+    correct = s.secret_a if s['round'] == 1 else s.secret_b
     if answer == 'YES':
         if filename != correct:
             record(answer, filename, 'failed_wrong_confirmation')
@@ -183,33 +190,41 @@ st.markdown("""<style>
     .song-number {font-size: 1.5rem; font-weight: 700;}
 </style>""", unsafe_allow_html=True)
 st.title('🎵 旋律式身分驗證 V2.2')
-st.caption('研究原型｜單一秘密旋律｜兩輪各11首｜跨輪重複3至5首（含秘密旋律）')
+st.caption('研究原型｜兩首不同秘密旋律｜兩輪各11首｜跨輪重複3至5首干擾旋律')
 st.info('Email僅供研究識別，不驗證信箱所有權；本研究原型不適用於正式帳號登入。')
 
 files = sorted(p for p in MUSIC_DIR.glob('*.mp3') if p.is_file()) if MUSIC_DIR.exists() else []
 st.write(f'目前讀取到 **{len(files)} 首 MP3**（資料夾：`music/`）')
-if len(files) < 19:
-    st.error('至少需要19首MP3才能執行本研究設定；原本20首曲庫即可直接使用。')
+if len(files) < 20:
+    st.error('雙秘密雙回合至少需要20首不同MP3；原本20首曲庫可直接使用。')
     st.stop()
 
 s = st.session_state
 if s.phase == 'register':
-    st.subheader('第一步｜輸入識別資料並選擇一首秘密旋律')
+    st.subheader('第一步｜輸入識別資料並選擇兩首不同的秘密旋律')
     email = st.text_input('受試者Email／代碼（僅作研究識別）', value=s.user_email,
                           placeholder='請輸入Email或受試者代碼').strip()
     consent = st.checkbox('我同意研究系統記錄識別資料、旋律判斷、反應時間及驗證結果，用於研究分析。')
     st.caption('研究紀錄將傳送至研究者管理的Google Sheets；請勿使用真實帳號密碼。')
     names = [p.name for p in files]
-    secret = st.selectbox('請選擇一首秘密旋律（兩輪皆使用）', names,
-                          index=None, placeholder='請選擇秘密旋律')
-    with st.expander('試聽秘密旋律'):
-        if secret:
-            st.audio((MUSIC_DIR / secret).read_bytes(), format='audio/mpeg')
+    secret_a = st.selectbox('第一輪秘密旋律 A', names,
+                            index=None, placeholder='請選擇第一首秘密旋律', key='register_a')
+    available_b = [name for name in names if name != secret_a]
+    secret_b = st.selectbox('第二輪秘密旋律 B（須與 A 不同）', available_b,
+                            index=None, placeholder='請選擇第二首秘密旋律', key='register_b')
+    with st.expander('試聽兩首秘密旋律'):
+        if secret_a:
+            st.write('第一輪 A')
+            st.audio((MUSIC_DIR / secret_a).read_bytes(), format='audio/mpeg')
+        if secret_b:
+            st.write('第二輪 B')
+            st.audio((MUSIC_DIR / secret_b).read_bytes(), format='audio/mpeg')
     if st.button('完成註冊並開始第一輪', type='primary', use_container_width=True,
-                 disabled=not secret or not email or not consent):
+                 disabled=not secret_a or not secret_b or secret_a == secret_b or not email or not consent):
         s.user_email = email
-        s.secret = secret
-        s.round_orders, s.overlap_count = make_round_orders(files, secret)
+        s.secret_a = secret_a
+        s.secret_b = secret_b
+        s.round_orders, s.overlap_count = make_round_orders(files, secret_a, secret_b)
         s.logs = []
         s.pending_logs = []
         s.synced_count = 0
@@ -226,7 +241,7 @@ elif s.phase == 'verify':
     st.progress((s['index'] + 1) / ROUND_SIZE)
     st.markdown(f'<div class="song-number">第 {s["index"] + 1}／{ROUND_SIZE} 首</div>',
                 unsafe_allow_html=True)
-    st.write('請先播放旋律，再判斷是否為註冊時選擇的秘密旋律。')
+    st.write('請先播放旋律，再判斷是否為本輪註冊的秘密旋律（第一輪 A、第二輪 B）。')
     filename = s.order[s['index']]
     st.audio((MUSIC_DIR / filename).read_bytes(), format='audio/mpeg')
     left, right = st.columns(2)
@@ -246,7 +261,7 @@ elif s.phase == 'round1_passed':
     st.markdown('<div class="big-status good">✅ 第一輪驗證成功！</div>',
                 unsafe_allow_html=True)
     st.subheader('準備進入第二輪驗證')
-    st.write('第二輪仍須辨認同一首秘密旋律。兩輪有部分歌曲重複。')
+    st.write('第二輪請辨認不同的秘密旋律 B。兩輪僅有部分干擾旋律重複。')
     if st.button('開始第二輪驗證', type='primary', use_container_width=True):
         start_round(2)
         st.rerun()
@@ -281,10 +296,10 @@ else:
         elif not s.result:
             st.success("✅ 25秒冷卻結束，可以重新驗證。")
 
-        if st.button('保留密碼，從第一輪重新驗證',
+        if st.button('保留兩首秘密旋律，從第一輪重新驗證',
                      use_container_width=True, disabled=seconds > 0):
             # 保留原密碼與受試者識別；重新抽樣兩輪歌曲。
-            s.round_orders, s.overlap_count = make_round_orders(files, s.secret)
+            s.round_orders, s.overlap_count = make_round_orders(files, s.secret_a, s.secret_b)
             s.session_id = secrets.token_hex(8)
             s.result = None
             s.reason = ''
