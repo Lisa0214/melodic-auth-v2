@@ -21,6 +21,7 @@ def initial_state():
         'round': 0, 'order': [], 'index': 0, 'logs': [],
         'started': None, 'session_id': None, 'lock_until': 0.0,
         'result': None, 'reason': '', 'round_started': None, 'round_valid': {1: True, 2: True}, 'round_selected': {1: False, 2: False},
+        'first_round_passed_internal': None,
         'user_email': '', 'pending_logs': [], 'synced_count': 0,
     }
     for key, value in defaults.items():
@@ -175,10 +176,12 @@ def handle(answer):
 def finish_round():
     s = st.session_state
     if s['round'] == 1:
+        # 僅在伺服器 Session State 保存第一輪結果；不向畫面揭露。
+        s.first_round_passed_internal = bool(s.round_valid[1] and s.round_selected[1])
         start_round(2)
     else:
         s.phase = 'result'
-        s.result = bool(s.round_valid[1] and s.round_valid[2])
+        s.result = bool(s.first_round_passed_internal and s.round_valid[2] and s.round_selected[2])
         s.reason = '驗證完成。' if s.result else '驗證未通過。'
         if not s.result:
             s.lock_until = time.monotonic() + LOCK_SECONDS
@@ -243,6 +246,7 @@ if s.phase == 'register':
         s.result = None
         s.round_valid = {1: True, 2: True}
         s.round_selected = {1: False, 2: False}
+        s.first_round_passed_internal = None
         s.lock_until = 0.0
         start_round(1)
         st.rerun()
@@ -308,6 +312,7 @@ else:
             s.result = None
             s.round_valid = {1: True, 2: True}
             s.round_selected = {1: False, 2: False}
+            s.first_round_passed_internal = None
             s.reason = ''
             s.lock_until = 0.0
             s.logs = []
